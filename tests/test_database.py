@@ -486,3 +486,71 @@ class TestDottedBaseName:
         with ScidDatabase.open(base) as reopened:
             assert reopened.version == version
             assert reopened.headers(0)["White"] == "Dot"
+
+
+# ---------------------------------------------------------------------------
+# API details
+# ---------------------------------------------------------------------------
+
+
+class TestOpenMode:
+    @pytest.mark.parametrize("mode", ["w", "a", "r+", "RW", ""])
+    def test_invalid_mode_rejected(self, tmp_db_path: Path, mode: str):
+        ScidDatabase.create(tmp_db_path, version=5).save()
+        with pytest.raises(ValueError, match="mode"):
+            ScidDatabase.open(tmp_db_path, mode=mode)
+
+
+class TestDescription:
+    @pytest.mark.parametrize("version", [4, 5])
+    def test_description_roundtrip(self, tmp_db_path: Path, version: int):
+        db = ScidDatabase.create(tmp_db_path, version=version)
+        db.description = "Meine Partien"
+        db.save()
+        with ScidDatabase.open(tmp_db_path) as reopened:
+            assert reopened.description == "Meine Partien"
+
+
+class TestContextManagerSave:
+    def test_saves_on_normal_exit(self, tmp_db_path: Path):
+        ScidDatabase.create(tmp_db_path, version=5).save()
+        with ScidDatabase.open(tmp_db_path, mode="rw") as db:
+            db.add_game(_make_game(moves=["e4"]))
+        with ScidDatabase.open(tmp_db_path) as db:
+            assert len(db) == 1
+
+    def test_does_not_save_after_exception(self, tmp_db_path: Path):
+        ScidDatabase.create(tmp_db_path, version=5).save()
+        with pytest.raises(RuntimeError):
+            with ScidDatabase.open(tmp_db_path, mode="rw") as db:
+                db.add_game(_make_game(moves=["e4"]))
+                raise RuntimeError("boom")
+        with ScidDatabase.open(tmp_db_path) as db:
+            assert len(db) == 0
+
+
+class TestPGNEncoding:
+    def test_from_pgn_latin1(self, tmp_path: Path):
+        pgn = tmp_path / "legacy.pgn"
+        pgn.write_bytes(
+            '[White "Müller"]\n[Black "Sämisch"]\n[Result "*"]\n\n1. e4 *\n'.encode(
+                "latin-1"
+            )
+        )
+        db = ScidDatabase.from_pgn(pgn, tmp_path / "db", encoding="latin-1")
+        assert db.headers(0)["White"] == "Müller"
+
+    def test_from_pgn_utf8_with_bom(self, tmp_path: Path):
+        pgn = tmp_path / "bom.pgn"
+        pgn.write_bytes(
+            '﻿[White "Дин"]\n[Black "B"]\n[Result "*"]\n\n1. e4 *\n'.encode("utf-8")
+        )
+        db = ScidDatabase.from_pgn(pgn, tmp_path / "db")
+        assert db.headers(0)["White"] == "Дин"
+
+    def test_to_pgn_utf8(self, tmp_db_path: Path, tmp_path: Path):
+        db = ScidDatabase.create(tmp_db_path, version=5)
+        db.add_game(_make_game(white="Дин Лижэнь", moves=["e4"]))
+        out = tmp_path / "out.pgn"
+        db.to_pgn(out)
+        assert '[White "Дин Лижэнь"]' in out.read_text(encoding="utf-8")

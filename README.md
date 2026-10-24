@@ -104,11 +104,15 @@ db.compact()                      # remove deleted games and reclaim space
 db.save()                         # write to disk
 ```
 
+Opened with `mode="rw"` as a context manager, the database is saved on a
+normal exit of the `with` block, but not when it is left by an exception.
+
 ## PGN import / export
 
 ```python
-# Import PGN into a new SCID database
+# Import PGN into a new SCID database (UTF-8 by default)
 db = ScidDatabase.from_pgn("games.pgn", "/tmp/imported", version=5)
+db = ScidDatabase.from_pgn("legacy.pgn", "/tmp/legacy", encoding="latin-1")
 
 # Export a SCID database to PGN
 with ScidDatabase.open("mydb") as db:

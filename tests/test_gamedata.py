@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import random
 from pathlib import Path
 
 import chess
@@ -11,7 +12,7 @@ import pytest
 
 from scid.database import ScidDatabase
 from scid.dates import encode_date
-from scid.gamedata import decode_game_data, decode_mainline_moves, encode_game_data
+from scid.gamedata import decode_game_data, encode_game_data
 
 
 class TestDecodeRealGames:
@@ -228,7 +229,48 @@ class TestCompactEventDateTag:
         assert game.headers["EventDate"] == "1999.07.04"
         assert game.headers["Annotator"] == "Ann"
 
-    def test_decode_mainline_moves(self):
-        board, moves = decode_mainline_moves(self.BLOB)
-        assert board == chess.Board()
-        assert moves == []
+
+def _random_annotated_game(seed: int, plies: int = 60) -> chess.pgn.Game:
+    """Build a game with nested side variations, preferring captures."""
+    rng = random.Random(seed)
+
+    def pick(board: chess.Board) -> chess.Move:
+        moves = list(board.legal_moves)
+        captures = [m for m in moves if board.is_capture(m)]
+        return rng.choice(captures if captures and rng.random() < 0.6 else moves)
+
+    def grow(node: chess.pgn.GameNode, depth: int, length: int) -> None:
+        for _ in range(length):
+            board = node.board()
+            if board.is_game_over():
+                return
+            main = pick(board)
+            child = node.add_variation(main)
+            if depth < 3 and rng.random() < 0.3:
+                for _ in range(rng.randint(1, 3)):
+                    alt = pick(board)
+                    if alt != main and not node.has_variation(alt):
+                        side = node.add_variation(alt)
+                        grow(side, depth + 1, rng.randint(1, 8))
+            node = child
+
+    game = chess.pgn.Game()
+    grow(game, 0, plies)
+    return game
+
+
+class TestVariationPieceLists:
+    @pytest.mark.parametrize("seed", range(20))
+    def test_random_nested_variations_roundtrip(self, seed: int):
+        game = _random_annotated_game(seed)
+        result = decode_game_data(encode_game_data(game))
+        assert str(result) == str(game)
+
+    def test_fixture_games_reencode(self, db_repertoire_path: Path):
+        with ScidDatabase.open(db_repertoire_path) as db:
+            for i in range(len(db)):
+                game = db[i]
+                again = decode_game_data(encode_game_data(game))
+                for tag in ("Event", "Site", "Date", "Round", "White", "Black", "Result"):
+                    again.headers[tag] = game.headers[tag]
+                assert str(again) == str(game)

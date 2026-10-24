@@ -156,8 +156,10 @@ class ScidDatabase:
 
         Raises:
             FileNotFoundError: If the database files don't exist.
-            ValueError: If the format cannot be detected.
+            ValueError: If *mode* is not 'r' or 'rw'.
         """
+        if mode not in ("r", "rw"):
+            raise ValueError(f"mode must be 'r' or 'rw', got {mode!r}")
         db = cls()
         db._path = str(path)
         db._mode = mode
@@ -243,16 +245,25 @@ class ScidDatabase:
 
     @property
     def description(self) -> str:
-        """Database description (SCID4 only)."""
+        """Database description.
+
+        Stored in the index header for SCID4 and in the namebase metadata
+        for SCID5.
+        """
+        if self._version == 5:
+            return self._namebase.db_info.get("description", "")
         if self._header:
             return self._header.description
         return ""
 
     @description.setter
     def description(self, value: str) -> None:
-        if self._header is None:
-            self._header = IndexHeader()
-        self._header.description = value
+        if self._version == 5:
+            self._namebase.db_info["description"] = value
+        else:
+            if self._header is None:
+                self._header = IndexHeader()
+            self._header.description = value
         self._dirty = True
 
     # ------------------------------------------------------------------
@@ -714,9 +725,9 @@ class ScidDatabase:
     # PGN export / import
     # ------------------------------------------------------------------
 
-    def to_pgn(self, path: str | Path) -> None:
-        """Export the entire database to a PGN file."""
-        with open(path, "w") as f:
+    def to_pgn(self, path: str | Path, encoding: str = "utf-8") -> None:
+        """Export the entire database to a PGN file in the given encoding."""
+        with open(path, "w", encoding=encoding) as f:
             exporter = chess.pgn.FileExporter(f)
             for i in range(len(self._entries)):
                 game = self._load_game(i)
@@ -728,6 +739,7 @@ class ScidDatabase:
         pgn_path: str | Path,
         db_path: str | Path,
         version: int = 5,
+        encoding: str = "utf-8-sig",
     ) -> ScidDatabase:
         """Import games from a PGN file into a new database.
 
@@ -735,13 +747,16 @@ class ScidDatabase:
             pgn_path: Path to the PGN file to import.
             db_path: Base path for the new database.
             version: SCID format version (4 or 5).
+            encoding: Text encoding of the PGN file.  The default accepts
+                UTF-8 with or without a byte order mark; pass e.g.
+                ``"latin-1"`` for legacy files.
 
         Returns:
             The newly created ScidDatabase.
         """
         db = cls.create(db_path, version=version)
 
-        with open(pgn_path) as f:
+        with open(pgn_path, encoding=encoding) as f:
             while True:
                 game = chess.pgn.read_game(f)
                 if game is None:
@@ -763,8 +778,10 @@ class ScidDatabase:
     def __enter__(self) -> ScidDatabase:
         return self
 
-    def __exit__(self, *args: object) -> None:
-        self.close()
+    def __exit__(self, exc_type: object, *args: object) -> None:
+        # Do not persist a partially modified database after an error.
+        if exc_type is None:
+            self.close()
 
     # ------------------------------------------------------------------
     # String representation

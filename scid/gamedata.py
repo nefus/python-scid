@@ -44,13 +44,11 @@ class _CommentMark:
 # ======================================================================
 
 
-def decode_game_data(data: bytes, fen: str | None = None) -> chess.pgn.Game:
+def decode_game_data(data: bytes) -> chess.pgn.Game:
     """Decode a SCID game data blob into a python-chess Game.
 
     Args:
         data: The raw game data blob from the .sg4/.sg5 file.
-        fen: Optional FEN from the index entry (used if the blob indicates
-             a custom start position).
 
     Returns:
         A chess.pgn.Game with moves, variations, comments, and NAGs.
@@ -146,17 +144,18 @@ def _decode_moves(
 
     Variation handling: the piece list state depends on the history of captures
     (swap-with-last ordering), so we can't simply rebuild it from a board
-    position.  Instead, we save/restore full piece list snapshots when entering
-    and leaving variations.
+    position.  Before a move that is followed by a variation, a snapshot of
+    the piece list is taken; each variation starts from a copy of it, and the
+    state after the move is restored when the variation ends.
     """
-    import copy
-
     comment_marks: list[_CommentMark] = []
     # Mark for a comment seen after START_MARKER, filled by the next move
     pending_start: _CommentMark | None = None
     node: chess.pgn.GameNode = game
-    # Stack entries: (node, piece_list_snapshot)
-    var_stack: list[tuple[chess.pgn.GameNode, PieceList]] = []
+    # Piece list before the move that led to *node*, if variations follow it
+    before: PieceList | None = None
+    # Stack entries: (node, piece list after its move, piece list before it)
+    var_stack: list[tuple[chess.pgn.GameNode, PieceList, PieceList]] = []
     at_variation_start = False
 
     while pos < len(data):
@@ -182,25 +181,21 @@ def _decode_moves(
                     comment_marks.append(_CommentMark(node))
 
             elif move_code == ENCODE_START_MARKER:
+                if before is None or not isinstance(node, chess.pgn.ChildNode):
+                    raise ValueError("Variation without a preceding move")
                 at_variation_start = True
-                # Save current state (after the last move) and back up to parent
-                var_stack.append((node, piece_list))
-                if isinstance(node, chess.pgn.ChildNode):
-                    parent = node.parent
-                    node = parent  # type: ignore[assignment]
-
-                    # Rebuild piece list by replaying from start
-                    piece_list = _rebuild_piece_list(node)
+                # Save the state after the last move; the variation replaces
+                # that move, so it starts from the position before it.
+                var_stack.append((node, piece_list, before))
+                node = node.parent
+                piece_list = before.copy()
+                before = None
 
             elif move_code == ENCODE_END_MARKER:
                 at_variation_start = False
                 if var_stack:
-                    # Restore to the saved node (which is after the variation point)
-                    saved_node, saved_pl = var_stack.pop()
-                    node = saved_node
-                    # Restore piece list state — we need to deep copy because
-                    # the saved_pl may be reused if there are multiple variations
-                    piece_list = _rebuild_piece_list(node)
+                    # Back to the main move; a further variation may follow
+                    node, piece_list, before = var_stack.pop()
 
             elif move_code == ENCODE_END_GAME:
                 break
@@ -243,6 +238,7 @@ def _decode_moves(
             move = chess.Move.null()
 
         # Update piece list and board
+        before = piece_list.copy() if _variation_follows(data, pos) else None
         piece_list.apply_move(move)
         piece_list.board.push(move)
 
@@ -256,31 +252,20 @@ def _decode_moves(
     return pos, comment_marks
 
 
-def _rebuild_piece_list(node: chess.pgn.GameNode) -> PieceList:
-    """Rebuild a PieceList by replaying all moves from the game start.
+def _variation_follows(data: bytes, pos: int) -> bool:
+    """Return True if a variation starts after the move ending at *pos*.
 
-    This is necessary because piece list indices depend on the history of
-    captures (swap-with-last ordering), so we can't just build from the
-    final board position.
+    Skips the move's NAGs (marker + value byte) and comment markers.
     """
-    # Collect all moves from root to this node
-    moves: list[chess.Move] = []
-    current = node
-    while isinstance(current, chess.pgn.ChildNode):
-        moves.append(current.move)
-        current = current.parent  # type: ignore[assignment]
-
-    # current is now the Game root
-    game_root: chess.pgn.Game = current  # type: ignore[assignment]
-    board = game_root.board()
-    pl = PieceList(board)
-
-    # Replay moves in order (root → node)
-    for move in reversed(moves):
-        pl.apply_move(move)
-        pl.board.push(move)
-
-    return pl
+    while pos < len(data):
+        byte = data[pos]
+        if byte == ENCODE_NAG:
+            pos += 2
+        elif byte == ENCODE_COMMENT:
+            pos += 1
+        else:
+            return byte == ENCODE_START_MARKER
+    return False
 
 
 def _is_diagonal_queen(move_code: int, from_sq: int) -> bool:
@@ -365,136 +350,6 @@ def _decode_move_target(
         return to_sq, promotion
 
     raise ValueError(f"Unknown piece type {pt}")
-
-
-# ======================================================================
-# Fast mainline-only replay for position search
-# ======================================================================
-
-
-def decode_mainline_moves(data: bytes) -> tuple[chess.Board, list[chess.Move]]:
-    """Decode only the mainline moves from a game blob (no Game tree).
-
-    This is significantly faster than full decode_game_data() because it
-    skips building the python-chess Game tree, handling variations, NAGs,
-    and comments.  Used for position/material search.
-
-    Returns:
-        (starting_board, list_of_mainline_moves)
-    """
-    pos = 0
-
-    # --- Section 1: Skip tags ---
-    while pos < len(data):
-        tag_len = data[pos]
-        pos += 1
-        if tag_len == 0:
-            break
-        if tag_len == 255:
-            pos += 3  # SCID2 compact EventDate
-        elif tag_len > 240:
-            # Common tag: skip value
-            value_len = data[pos]
-            pos += 1 + value_len
-        else:
-            pos += tag_len  # tag name
-            value_len = data[pos]
-            pos += 1 + value_len
-
-    # --- Section 2: StartBoard ---
-    if pos >= len(data):
-        return chess.Board(), []
-
-    flags = data[pos]
-    pos += 1
-
-    if flags & 0x01:
-        # Read FEN
-        end = data.index(0, pos)
-        fen = data[pos:end].decode("latin-1")
-        pos = end + 1
-        board = chess.Board(fen)
-    else:
-        board = chess.Board()
-
-    piece_list = PieceList(board)
-
-    # --- Section 3: Decode mainline moves only ---
-    moves: list[chess.Move] = []
-    var_depth = 0
-
-    while pos < len(data):
-        byte = data[pos]
-        piece_idx = (byte >> 4) & 0x0F
-        move_code = byte & 0x0F
-
-        # Special markers
-        if piece_idx == 0 and move_code >= ENCODE_NAG:
-            pos += 1
-            if move_code == ENCODE_NAG:
-                pos += 1  # skip NAG value
-            elif move_code == ENCODE_START_MARKER:
-                var_depth += 1
-            elif move_code == ENCODE_END_MARKER:
-                var_depth -= 1
-            elif move_code == ENCODE_END_GAME:
-                break
-            continue
-
-        pos += 1
-
-        # Inside a variation — skip the move byte(s)
-        if var_depth > 0:
-            # Still need to consume 2-byte queen moves
-            if piece_idx > 0 or move_code < ENCODE_NAG:
-                # We need to know if this is a 2-byte queen move to skip correctly
-                # For simplicity, check if it would be a diagonal queen by looking at
-                # the piece at the position. But we don't track pieces in variations.
-                # Instead, just check the second-byte sentinel pattern: if a queen's
-                # move_code equals the from_square's file, there's a second byte.
-                # We can't know this without tracking pieces, so we use a heuristic:
-                # if the next byte is in range [64..127], it's likely a 2-byte queen move.
-                # Actually, for correctness we need to properly handle this.
-                # The safest approach: just check if move_code < 8 and next byte >= 64.
-                # But this isn't reliable. Let's use a different strategy:
-                # Track pieces even in variations to correctly skip bytes.
-                pass
-            continue
-
-        # Mainline move — decode it
-        from_sq = piece_list.get_square(board.turn, piece_idx)
-        piece = board.piece_at(from_sq)
-        if piece is None:
-            break  # Corrupt data
-
-        pt = piece.piece_type
-
-        to_sq, promotion = _decode_move_target(
-            pt, move_code, from_sq, board.turn, data, pos
-        )
-        if pt == chess.QUEEN and _is_diagonal_queen(move_code, from_sq):
-            second = data[pos]
-            pos += 1
-            to_sq = second - 64
-            promotion = None
-
-        # Handle castling
-        if pt == chess.KING and move_code in (9, 10):
-            rank = chess.square_rank(from_sq)
-            if move_code == 10:
-                move = chess.Move(from_sq, chess.square(6, rank))
-            else:
-                move = chess.Move(from_sq, chess.square(2, rank))
-        elif pt == chess.KING and move_code == 0:
-            move = chess.Move.null()
-        else:
-            move = chess.Move(from_sq, to_sq, promotion=promotion)
-
-        piece_list.apply_move(move)
-        piece_list.board.push(move)
-        moves.append(move)
-
-    return board, moves
 
 
 def _decode_comments(
@@ -630,8 +485,9 @@ def _encode_node_children(
     if not variations:
         return
 
-    # Main line move
+    # Main line move; keep the position before it for the side variations
     main = variations[0]
+    before = piece_list.copy() if len(variations) > 1 else None
     _encode_single_move(main, piece_list, buf, comments)
 
     # Side variations
@@ -641,9 +497,10 @@ def _encode_node_children(
             buf.append(ENCODE_COMMENT)
             comments.append(var.starting_comment)
 
-        # Rebuild piece list by replaying from root — we can't just use
-        # node.board() because piece list indices depend on capture history
-        var_pl = _rebuild_piece_list(node)
+        # Piece list indices depend on capture history, so start from a copy
+        # of the main line's piece list rather than from node.board()
+        assert before is not None
+        var_pl = before.copy()
 
         _encode_single_move(var, var_pl, buf, comments)
         _encode_node_children(var, var_pl, buf, comments)

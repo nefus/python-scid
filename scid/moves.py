@@ -190,6 +190,19 @@ class PieceList:
             self._count[color] = len(pieces)
             self._sq_to_idx[color] = {sq: i for i, sq in enumerate(pieces)}
 
+    def copy(self) -> PieceList:
+        """Return an independent copy, e.g. to return to a variation point.
+
+        The board is copied without its move stack, which piece list
+        handling does not need.
+        """
+        new = PieceList.__new__(PieceList)
+        new.board = self.board.copy(stack=False)
+        new._lists = [list(pieces) for pieces in self._lists]
+        new._sq_to_idx = [dict(index) for index in self._sq_to_idx]
+        new._count = list(self._count)
+        return new
+
     def get_square(self, color: bool, index: int) -> int:
         """Get the square of piece at given index for given color."""
         return self._lists[color][index]
