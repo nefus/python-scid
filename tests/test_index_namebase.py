@@ -253,3 +253,23 @@ class TestNamebaseTextEncoding:
         )
         nb = NameBase.read_sn4(io.BytesIO(raw))
         assert nb.get_name(0, 0) == "R\x94hrl"
+
+
+class TestNameIdGaps:
+    def test_header_search_finds_ids_beyond_name_count(self):
+        from scid.index import IndexEntry
+        from scid.search import HeaderSearchCriteria, search_header
+
+        nb = NameBase()
+        nb.insert(0, 0, "Anand")
+        nb.insert(0, 5, "Carlsen")  # IDs 1-4 unused
+        entries = [IndexEntry(white_id=0, black_id=5)]
+        hits = search_header(entries, nb, HeaderSearchCriteria(black="carlsen"))
+        assert hits == [0]
+        assert search_header(entries, nb, HeaderSearchCriteria(black="")) == [0]
+
+    def test_sn4_rejects_ids_wider_than_id_field(self):
+        nb = NameBase()
+        nb.insert(0, 70000, "Carlsen")  # 1 name -> 2-byte IDs
+        with pytest.raises(ValueError, match="does not fit"):
+            nb.write_sn4(io.BytesIO())

@@ -59,11 +59,12 @@ def encode_event_date_delta(game_date: int, event_date: int) -> int:
     """
     if event_date == 0:
         return 0
-    gy, gm, gd = decode_date(game_date)
+    gy, _gm, _gd = decode_date(game_date)
     ey, em, ed = decode_date(event_date)
-    eyear_enc = (ey + 4 - gy) & 0x07
-    if eyear_enc == 0:
-        return 0  # Cannot encode, would mean "no event date"
+    # Only event years within 3 years of the game year can be stored.
+    if not -3 <= ey - gy <= 3:
+        return 0
+    eyear_enc = ey + 4 - gy
     # 12 bits: yearEnc (3 bits) | month (4 bits) | day (5 bits)
     return (eyear_enc << 9) | (em << 5) | ed
 

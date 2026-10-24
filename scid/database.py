@@ -194,13 +194,13 @@ class ScidDatabase:
 
     def _detect_and_load(self) -> None:
         """Detect format version and load all three files."""
-        p = Path(self._path)
-
+        # Append extensions instead of using Path.with_suffix(), which would
+        # replace part of a base name such as "games.2024".
         # Try SCID5 first, then SCID4
-        if p.with_suffix(".si5").exists():
+        if Path(f"{self._path}.si5").exists():
             self._version = 5
             self._load_v5()
-        elif p.with_suffix(".si4").exists():
+        elif Path(f"{self._path}.si4").exists():
             self._version = 4
             self._load_v4()
         else:

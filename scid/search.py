@@ -395,11 +395,11 @@ def _build_name_mask(
     pattern: str,
 ) -> set[int]:
     """Build a set of name IDs matching the pattern."""
+    # Iterate over all IDs: SCID4 namebases may contain gaps, so the
+    # highest ID can exceed the number of names.
     mask: set[int] = set()
-    count = namebase.count(name_type)
-    for name_id in range(count):
-        name = namebase.get_name(name_type, name_id)
-        if _name_matches(pattern, name):
+    for name_id, name in enumerate(namebase.names[name_type]):
+        if name is not None and _name_matches(pattern, name):
             mask.add(name_id)
     return mask
 

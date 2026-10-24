@@ -3,8 +3,16 @@
 from __future__ import annotations
 
 import chess
+import pytest
 
-from scid.dates import date_from_pgn, date_to_pgn, encode_date, decode_date
+from scid.dates import (
+    date_from_pgn,
+    date_to_pgn,
+    decode_date,
+    decode_event_date_delta,
+    encode_date,
+    encode_event_date_delta,
+)
 from scid.eco import eco_encode, eco_decode
 from scid.matsig import encode_matsig, decode_matsig
 from scid.homepawns import encode_homepawns, decode_homepawns
@@ -129,3 +137,18 @@ class TestHomePawns:
         changes = decode_homepawns(data)
         # e2 pawn -> bit position 11 in SCID's bitmap (a2=15, b2=14, ..., e2=11)
         assert 11 in changes
+
+
+class TestEventDateDelta:
+    GAME = encode_date(2000, 6, 15)
+
+    @pytest.mark.parametrize("years", [-3, -2, -1, 0, 1, 2, 3])
+    def test_roundtrip_within_three_years(self, years: int):
+        event = encode_date(2000 + years, 5, 1)
+        delta = encode_event_date_delta(self.GAME, event)
+        assert decode_event_date_delta(self.GAME, delta) == event
+
+    @pytest.mark.parametrize("years", [-5, -4, 4, 5, 11])
+    def test_out_of_range_is_dropped(self, years: int):
+        event = encode_date(2000 + years, 5, 1)
+        assert encode_event_date_delta(self.GAME, event) == 0

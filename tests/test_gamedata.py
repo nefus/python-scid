@@ -10,7 +10,8 @@ import chess.pgn
 import pytest
 
 from scid.database import ScidDatabase
-from scid.gamedata import decode_game_data, encode_game_data
+from scid.dates import encode_date
+from scid.gamedata import decode_game_data, decode_mainline_moves, encode_game_data
 
 
 class TestDecodeRealGames:
@@ -209,3 +210,25 @@ class TestCommentsAndText:
         assert result.headers["Annotator"] == "Дмитрий"
         assert result.headers["Opening"] == "Défense française"
         assert result.variations[0].comment == "Großartig ♔"
+
+
+class TestCompactEventDateTag:
+    """SCID2-era blobs store EventDate as tag 255 + 3 binary bytes."""
+
+    BLOB = (
+        bytes([255]) + encode_date(1999, 7, 4).to_bytes(3, "big")  # EventDate
+        + bytes([243, 3]) + b"Ann"  # Annotator (common tag)
+        + b"\x00"  # end of tags
+        + b"\x00"  # standard start
+        + bytes([0x0F])  # end of game
+    )
+
+    def test_decode(self):
+        game = decode_game_data(self.BLOB)
+        assert game.headers["EventDate"] == "1999.07.04"
+        assert game.headers["Annotator"] == "Ann"
+
+    def test_decode_mainline_moves(self):
+        board, moves = decode_mainline_moves(self.BLOB)
+        assert board == chess.Board()
+        assert moves == []

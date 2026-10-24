@@ -472,3 +472,17 @@ class TestSaveSafety:
 
         after = {p.name: p.read_bytes() for p in tmp_db_path.parent.iterdir()}
         assert after == before  # no partial writes, no leftover temp files
+
+
+class TestDottedBaseName:
+    @pytest.mark.parametrize("version", [4, 5])
+    def test_open_base_name_with_dot(self, tmp_path: Path, version: int):
+        base = tmp_path / "games.2024"
+        db = ScidDatabase.create(base, version=version)
+        db.add_game(_make_game(white="Dot", moves=["e4"]))
+        db.save()
+        # Decoy that Path.with_suffix() would pick up with the other version
+        (tmp_path / f"games.si{9 - version}").write_bytes(b"decoy")
+        with ScidDatabase.open(base) as reopened:
+            assert reopened.version == version
+            assert reopened.headers(0)["White"] == "Dot"

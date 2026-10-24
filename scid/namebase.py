@@ -300,8 +300,15 @@ def _write_sn4_names(
 
     prev_name = b""
 
+    max_id = (1 << (8 * id_size)) - 1
     for i, (name_id, name) in enumerate(sorted_entries):
-        # Write ID
+        # Write ID.  The ID width depends on the number of names (as in
+        # SCID's reader), so an ID beyond it cannot be stored.
+        if name_id > max_id:
+            raise ValueError(
+                f"name ID {name_id} does not fit the {id_size}-byte .sn4 ID "
+                f"field for {num_names} names"
+            )
         if id_size == 3:
             write_uint24_be(f, name_id)
         else:

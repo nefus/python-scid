@@ -23,6 +23,7 @@ from scid.constants import (
     ENCODE_NAG,
     ENCODE_START_MARKER,
 )
+from scid.dates import date_to_pgn
 from scid.moves import PieceList, encode_move
 
 
@@ -91,6 +92,12 @@ def _decode_tags(data: bytes, pos: int) -> tuple[int, dict[str, str]]:
         if tag_len == 0:
             break  # End of tags
 
+        if tag_len == 255:
+            # SCID2 compact EventDate: 20-bit date in 3 big-endian bytes
+            raw_date = int.from_bytes(data[pos : pos + 3], "big")
+            pos += 3
+            tags["EventDate"] = date_to_pgn(raw_date)
+            continue
         if tag_len > 240:
             # Common tag shorthand
             idx = tag_len - COMMON_TAG_BASE
@@ -98,13 +105,6 @@ def _decode_tags(data: bytes, pos: int) -> tuple[int, dict[str, str]]:
                 tag_name = COMMON_TAGS[idx]
             else:
                 tag_name = f"Unknown{tag_len}"
-        elif tag_len == 255:
-            # SCID2 compact EventDate (3-byte value)
-            tag_name = "EventDate"
-            val = data[pos : pos + 3].decode("latin-1")
-            pos += 3
-            tags[tag_name] = val
-            continue
         else:
             tag_name = decode_text(data[pos : pos + tag_len])
             pos += tag_len
@@ -390,12 +390,12 @@ def decode_mainline_moves(data: bytes) -> tuple[chess.Board, list[chess.Move]]:
         pos += 1
         if tag_len == 0:
             break
-        if tag_len > 240:
+        if tag_len == 255:
+            pos += 3  # SCID2 compact EventDate
+        elif tag_len > 240:
             # Common tag: skip value
             value_len = data[pos]
             pos += 1 + value_len
-        elif tag_len == 255:
-            pos += 3  # SCID2 EventDate
         else:
             pos += tag_len  # tag name
             value_len = data[pos]
