@@ -8,10 +8,12 @@ python-chess Game objects.  The blob format is:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import chess
 import chess.pgn
 
-from scid._filebuf import read_terminated_string
+from scid._filebuf import decode_text, encode_text, read_terminated_string
 from scid.constants import (
     COMMON_TAG_BASE,
     COMMON_TAGS,
@@ -26,6 +28,14 @@ from scid.moves import PieceList, encode_move
 
 # Seven Tag Roster — these are stored in the index/namebase, not in the blob
 _STR_TAGS = {"Event", "Site", "Date", "Round", "White", "Black", "Result"}
+
+
+@dataclass
+class _CommentMark:
+    """Target of one entry in the comments section of a game blob."""
+
+    node: chess.pgn.GameNode | None
+    starting: bool = False
 
 
 # ======================================================================
@@ -96,12 +106,12 @@ def _decode_tags(data: bytes, pos: int) -> tuple[int, dict[str, str]]:
             tags[tag_name] = val
             continue
         else:
-            tag_name = data[pos : pos + tag_len].decode("latin-1")
+            tag_name = decode_text(data[pos : pos + tag_len])
             pos += tag_len
 
         value_len = data[pos]
         pos += 1
-        value = data[pos : pos + value_len].decode("latin-1")
+        value = decode_text(data[pos : pos + value_len])
         pos += value_len
         tags[tag_name] = value
 
@@ -126,10 +136,13 @@ def _decode_start_board(data: bytes, pos: int) -> tuple[int, str | None]:
 
 def _decode_moves(
     data: bytes, pos: int, game: chess.pgn.Game, piece_list: PieceList
-) -> tuple[int, list[chess.pgn.GameNode]]:
+) -> tuple[int, list[_CommentMark]]:
     """Decode the move stream into the game tree.
 
-    Returns (new_pos, list_of_nodes_with_comments).
+    Returns (new_pos, comment_marks) where each mark says which node the next
+    comment string belongs to.  A comment directly after a variation start
+    marker (before the variation's first move) is that move's
+    ``starting_comment``.
 
     Variation handling: the piece list state depends on the history of captures
     (swap-with-last ordering), so we can't simply rebuild it from a board
@@ -138,10 +151,13 @@ def _decode_moves(
     """
     import copy
 
-    comment_marks: list[chess.pgn.GameNode] = []
+    comment_marks: list[_CommentMark] = []
+    # Mark for a comment seen after START_MARKER, filled by the next move
+    pending_start: _CommentMark | None = None
     node: chess.pgn.GameNode = game
     # Stack entries: (node, piece_list_snapshot)
     var_stack: list[tuple[chess.pgn.GameNode, PieceList]] = []
+    at_variation_start = False
 
     while pos < len(data):
         byte = data[pos]
@@ -159,9 +175,14 @@ def _decode_moves(
                     node.nags.add(nag_val)
 
             elif move_code == ENCODE_COMMENT:
-                comment_marks.append(node)
+                if at_variation_start:
+                    pending_start = _CommentMark(None, starting=True)
+                    comment_marks.append(pending_start)
+                else:
+                    comment_marks.append(_CommentMark(node))
 
             elif move_code == ENCODE_START_MARKER:
+                at_variation_start = True
                 # Save current state (after the last move) and back up to parent
                 var_stack.append((node, piece_list))
                 if isinstance(node, chess.pgn.ChildNode):
@@ -172,6 +193,7 @@ def _decode_moves(
                     piece_list = _rebuild_piece_list(node)
 
             elif move_code == ENCODE_END_MARKER:
+                at_variation_start = False
                 if var_stack:
                     # Restore to the saved node (which is after the variation point)
                     saved_node, saved_pl = var_stack.pop()
@@ -226,6 +248,10 @@ def _decode_moves(
 
         # Add move to game tree
         node = node.add_variation(move)
+        at_variation_start = False
+        if pending_start is not None:
+            pending_start.node = node
+            pending_start = None
 
     return pos, comment_marks
 
@@ -472,19 +498,24 @@ def decode_mainline_moves(data: bytes) -> tuple[chess.Board, list[chess.Move]]:
 
 
 def _decode_comments(
-    data: bytes, pos: int, comment_marks: list[chess.pgn.GameNode]
+    data: bytes, pos: int, comment_marks: list[_CommentMark]
 ) -> None:
     """Read null-terminated comment strings and attach to marked nodes."""
-    for node in comment_marks:
+    for mark in comment_marks:
         if pos >= len(data):
             break
         # Find the null terminator
         end = pos
         while end < len(data) and data[end] != 0:
             end += 1
-        comment = data[pos:end].decode("utf-8", errors="replace")
+        comment = decode_text(data[pos:end])
         pos = end + 1  # skip the null
-        node.comment = comment
+        if mark.node is None:
+            continue  # variation start comment without a following move
+        if mark.starting:
+            mark.node.starting_comment = comment
+        else:
+            mark.node.comment = comment
 
 
 # ======================================================================
@@ -536,11 +567,11 @@ def _encode_tags(game: chess.pgn.Game, buf: bytearray) -> None:
         if tag_code is not None:
             buf.append(tag_code)
         else:
-            name_bytes = key.encode("latin-1")[:240]
+            name_bytes = encode_text(key, 240)
             buf.append(len(name_bytes))
             buf.extend(name_bytes)
 
-        val_bytes = value.encode("latin-1")[:255]
+        val_bytes = encode_text(value, 255)
         buf.append(len(val_bytes))
         buf.extend(val_bytes)
 
@@ -606,7 +637,7 @@ def _encode_node_children(
     # Side variations
     for var in variations[1:]:
         buf.append(ENCODE_START_MARKER)
-        if var.comment and var.starting_comment:
+        if var.starting_comment:
             buf.append(ENCODE_COMMENT)
             comments.append(var.starting_comment)
 

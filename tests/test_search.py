@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 from pathlib import Path
 
 import chess
@@ -23,6 +24,7 @@ from scid.search import (
     _hpsig_make,
     _hpsig_match,
     _less_mat,
+    _material_matches_criteria,
     _matsig_is_reachable,
     _stored_line_match,
     search_header,
@@ -1065,3 +1067,177 @@ class TestTreeSearchFreechess:
             for n in tree.nodes:
                 if n.avg_year > 0:
                     assert 1990 <= n.avg_year <= 2030
+
+
+# =====================================================================
+# Pre-filtered searches must match a full replay
+# =====================================================================
+
+
+def _brute_force_material(
+    db: ScidDatabase, criteria: MaterialSearchCriteria, indices: list[int]
+) -> set[int]:
+    """Return game indices matching *criteria* by replaying every game."""
+    hits: set[int] = set()
+    for idx in indices:
+        game = db[idx]
+        board = game.board()
+        if _material_matches_criteria(board, criteria):
+            hits.add(idx)
+            continue
+        for move in game.mainline_moves():
+            board.push(move)
+            if _material_matches_criteria(board, criteria):
+                hits.add(idx)
+                break
+    return hits
+
+
+_MATERIAL_CRITERIA = [
+    MaterialSearchCriteria(wq=(0, 0), bq=(0, 0)),
+    MaterialSearchCriteria(wq=(0, 0)),
+    MaterialSearchCriteria(wr=(1, 1), br=(1, 1), wp=(0, 3), bp=(0, 3)),
+    MaterialSearchCriteria(wp=(8, 8), bp=(8, 8)),
+    MaterialSearchCriteria(wq=(2, 3)),
+    MaterialSearchCriteria(wn=(3, 3)),
+]
+
+
+def _promotion_db(path: Path, version: int) -> ScidDatabase:
+    """Create a small database with queen and under-promotions."""
+    db = ScidDatabase.create(path, version=version)
+    pgns = [
+        # Queens traded, then promotion to a second white queen
+        "1. e4 d5 2. exd5 Qxd5 3. Nc3 Qxd2+ 4. Qxd2 *",
+        '[SetUp "1"]\n[FEN "8/P6k/8/8/8/8/8/K7 w - - 0 1"]\n\n1. a8=Q *',
+        '[SetUp "1"]\n[FEN "8/P6k/8/8/8/8/8/K6Q w - - 0 1"]\n\n1. a8=Q *',
+        '[SetUp "1"]\n[FEN "8/P6k/8/8/8/8/8/KNN5 w - - 0 1"]\n\n1. a8=N *',
+        "1. d4 d5 2. c4 e6 *",
+    ]
+    for pgn in pgns:
+        db.add_game(chess.pgn.read_game(io.StringIO(pgn)))
+    return db
+
+
+class TestMaterialPrefilterMatchesBruteForce:
+    @pytest.mark.parametrize("criteria", _MATERIAL_CRITERIA)
+    @pytest.mark.parametrize("version", [4, 5])
+    def test_created_db(
+        self, tmp_db_path: Path, version: int, criteria: MaterialSearchCriteria
+    ) -> None:
+        db = _promotion_db(tmp_db_path, version)
+        indices = list(range(len(db)))
+        fast = {r.game_index for r in db.search_material(criteria)}
+        assert fast == _brute_force_material(db, criteria, indices)
+
+    @pytest.mark.parametrize("criteria", _MATERIAL_CRITERIA)
+    def test_freechess(
+        self, db_freechess_path: Path, criteria: MaterialSearchCriteria
+    ) -> None:
+        with ScidDatabase.open(db_freechess_path) as db:
+            indices = list(range(300))
+            fast = {
+                r.game_index
+                for r in db.search_material(criteria, game_indices=indices)
+            }
+            assert fast == _brute_force_material(db, criteria, indices)
+
+    def test_queenless_games_found(self, db_freechess_path: Path) -> None:
+        with ScidDatabase.open(db_freechess_path) as db:
+            c = MaterialSearchCriteria(wq=(0, 0), bq=(0, 0))
+            assert db.search_material(c, game_indices=list(range(300)))
+
+
+class TestPositionSearchAddedGames:
+    """Games added via add_game() must be found by position and tree search."""
+
+    MOVES = "e4 e5 Nc3 Nf6 f4 d6 Nf3 Nc6 Bc4 Be7 O-O O-O".split()
+
+    def _db(self, path: Path, version: int) -> ScidDatabase:
+        db = ScidDatabase.create(path, version=version)
+        game = chess.pgn.Game()
+        node = game
+        board = chess.Board()
+        for san in self.MOVES:
+            node = node.add_variation(board.parse_san(san))
+            board.push(node.move)
+        db.add_game(game)
+        return db
+
+    @pytest.mark.parametrize("version", [4, 5])
+    @pytest.mark.parametrize("plies", [0, 1, 4, 5, 8, 12])
+    def test_search_position(self, tmp_db_path: Path, version: int, plies: int):
+        db = self._db(tmp_db_path, version)
+        target = chess.Board()
+        for san in self.MOVES[:plies]:
+            target.push_san(san)
+        assert db.search_position(target) == [
+            PositionSearchResult(game_index=0, ply=plies)
+        ]
+        db.save()
+        with ScidDatabase.open(tmp_db_path) as reopened:
+            assert reopened.search_position(target) == [
+                PositionSearchResult(game_index=0, ply=plies)
+            ]
+
+    @pytest.mark.parametrize("version", [4, 5])
+    def test_search_tree(self, tmp_db_path: Path, version: int):
+        db = self._db(tmp_db_path, version)
+        target = chess.Board()
+        for san in self.MOVES[:5]:
+            target.push_san(san)
+        tree = db.search_tree(target)
+        assert [n.san for n in tree.nodes] == [self.MOVES[5]]
+
+
+class TestPositionIgnoresMoveCounters:
+    """Positions match regardless of halfmove clock and fullmove number."""
+
+    GAME = "e4 e5 Nc3 Nf6 f4".split()
+
+    def _db(self, path: Path) -> ScidDatabase:
+        db = ScidDatabase.create(path, version=5)
+        game = chess.pgn.Game()
+        node = game
+        for san in self.GAME:
+            node = node.add_variation(node.board().parse_san(san))
+        db.add_game(game)
+        return db
+
+    def test_transposition_with_different_halfmove_clock(self, tmp_db_path: Path):
+        db = self._db(tmp_db_path)
+        target = chess.Board()
+        for san in "e4 Nf6 Nc3 e5".split():
+            target.push_san(san)
+        assert db.search_position(target) == [PositionSearchResult(0, 4)]
+
+    def test_fen_target_with_default_counters(self, tmp_db_path: Path):
+        db = self._db(tmp_db_path)
+        reached = chess.Board()
+        for san in self.GAME:
+            reached.push_san(san)
+        target = chess.Board(reached.fen().rsplit(" ", 2)[0] + " 0 1")
+        assert db.search_position(target) == [PositionSearchResult(0, 5)]
+        tree = db.search_tree(target)
+        assert tree.games_matched == 0  # game ends here, no next move
+
+        before = chess.Board()
+        for san in self.GAME[:4]:
+            before.push_san(san)
+        target = chess.Board(before.fen().rsplit(" ", 2)[0] + " 0 1")
+        assert [n.san for n in db.search_tree(target).nodes] == ["f4"]
+
+    def test_stored_line_ignores_counters(self) -> None:
+        board = chess.Board()
+        board.push_san("d4")
+        target = chess.Board(board.fen().rsplit(" ", 2)[0] + " 7 42")
+        assert _stored_line_match(target, 15) == 1
+
+    def test_castling_rights_still_distinguish(self, tmp_db_path: Path):
+        db = self._db(tmp_db_path)
+        reached = chess.Board()
+        for san in self.GAME:
+            reached.push_san(san)
+        target = reached.copy()
+        target.castling_rights = chess.BB_EMPTY
+        assert db.search_position(target) == []

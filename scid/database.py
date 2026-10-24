@@ -22,23 +22,30 @@ Usage::
 
 from __future__ import annotations
 
+import io
+import os
+import tempfile
 from pathlib import Path
 from typing import Iterator, overload
 
 import chess.pgn
 
 from scid.constants import (
+    FLAG_DELETE,
+    FLAG_PROMO,
+    FLAG_START,
+    FLAG_UPROMO,
     NAME_EVENT,
     NAME_PLAYER,
     NAME_ROUND,
     NAME_SITE,
     RESULT_FROM_STR,
     RESULT_STR,
-    encode_count,
 )
 from scid.dates import date_from_pgn, date_to_pgn
 from scid.eco import eco_decode, eco_encode
 from scid.gamedata import decode_game_data, encode_game_data
+from scid.homepawns import encode_homepawns_from_moves
 from scid.index import (
     IndexEntry,
     IndexHeader,
@@ -61,6 +68,53 @@ from scid.search import (
     search_tree,
 )
 from scid.stored_lines import classify
+
+
+# SCID's largest valid rating (MAX_ELO); ratings are stored in 12 bits.
+MAX_ELO = 4000
+
+
+def _parse_elo(value: str) -> int:
+    """Parse a PGN Elo tag, clamped to SCID's valid range (0 if invalid)."""
+    try:
+        elo = int(value)
+    except ValueError:
+        return 0
+    return max(0, min(elo, MAX_ELO))
+
+
+def _replace_files(contents: dict[str, bytes | bytearray]) -> None:
+    """Write each file via a temporary file and atomically rename it into place.
+
+    All contents are encoded before this is called, so encoding errors cannot
+    leave a partially written database.  Each temporary file is fsynced before
+    any target is replaced, which keeps the window in which the three files
+    can disagree as short as possible.
+    """
+    temporaries: list[tuple[str, str]] = []
+    try:
+        for target, data in contents.items():
+            directory = os.path.dirname(os.path.abspath(target))
+            fd, tmp = tempfile.mkstemp(
+                prefix=f".{os.path.basename(target)}.", suffix=".tmp", dir=directory
+            )
+            temporaries.append((tmp, target))
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+            if os.path.exists(target):
+                os.chmod(tmp, os.stat(target).st_mode & 0o7777)
+            else:
+                umask = os.umask(0)
+                os.umask(umask)
+                os.chmod(tmp, 0o666 & ~umask)
+        for tmp, target in temporaries:
+            os.replace(tmp, target)
+    finally:
+        for tmp, _target in temporaries:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
 
 
 class ScidDatabase:
@@ -507,8 +561,7 @@ class ScidDatabase:
         if not 0 <= index < len(self._entries):
             raise IndexError(f"game index {index} out of range")
 
-        # Set the delete flag (bit 0 of the 22-bit flags field)
-        self._entries[index].flags |= 0x01
+        self._entries[index].flags |= 1 << FLAG_DELETE
         self._dirty = True
 
     def compact(self) -> None:
@@ -522,7 +575,7 @@ class ScidDatabase:
         new_entries = []
 
         for entry in self._entries:
-            if entry.flags & 0x01:
+            if entry.flags & (1 << FLAG_DELETE):
                 continue  # Skip deleted games
 
             blob = self._game_data[entry.offset : entry.offset + entry.game_data_size]
@@ -564,14 +617,8 @@ class ScidDatabase:
             entry.eco_code = eco_encode(eco_str)
 
         # Elo
-        try:
-            entry.white_elo = int(h.get("WhiteElo", "0"))
-        except ValueError:
-            entry.white_elo = 0
-        try:
-            entry.black_elo = int(h.get("BlackElo", "0"))
-        except ValueError:
-            entry.black_elo = 0
+        entry.white_elo = _parse_elo(h.get("WhiteElo", "0"))
+        entry.black_elo = _parse_elo(h.get("BlackElo", "0"))
 
         # Count half-moves
         entry.num_half_moves = min(sum(1 for _ in game.mainline_moves()), 1023)
@@ -594,12 +641,26 @@ class ScidDatabase:
 
         _walk(game)
 
-        entry.n_variations = encode_count(var_count)
-        entry.n_comments = encode_count(comment_count)
-        entry.n_nags = encode_count(nag_count)
+        # IndexEntry holds plain counts; the index codecs apply encode_count().
+        entry.n_variations = var_count
+        entry.n_comments = comment_count
+        entry.n_nags = nag_count
 
-        # Stored line code
-        entry.stored_line_code = classify(list(game.mainline_moves()))
+        # Index flags and position search data.  SCID leaves the stored line
+        # and home pawn data empty for games with a non-standard start.
+        start_board = game.board()
+        mainline = list(game.mainline_moves())
+        promotions = [m.promotion for m in mainline if m.promotion]
+        if start_board.fen() != chess.STARTING_FEN:
+            entry.flags |= 1 << FLAG_START
+        if promotions:
+            entry.flags |= 1 << FLAG_PROMO
+        if any(p != chess.QUEEN for p in promotions):
+            entry.flags |= 1 << FLAG_UPROMO
+
+        if not entry.flags & (1 << FLAG_START):
+            entry.stored_line_code = classify(mainline)
+            entry.home_pawn_data = encode_homepawns_from_moves(start_board, mainline)
 
         # Material signature from final position
         board = game.end().board()
@@ -626,20 +687,28 @@ class ScidDatabase:
 
     def _save_v4(self, path: str) -> None:
         hdr = self._header or IndexHeader()
-        with open(f"{path}.si4", "wb") as f:
-            write_si4(f, hdr, self._entries)
-        with open(f"{path}.sn4", "wb") as f:
-            self._namebase.write_sn4(f)
-        with open(f"{path}.sg4", "wb") as f:
-            f.write(self._game_data)
+        index, names = io.BytesIO(), io.BytesIO()
+        write_si4(index, hdr, self._entries)
+        self._namebase.write_sn4(names)
+        _replace_files(
+            {
+                f"{path}.sg4": self._game_data,
+                f"{path}.sn4": names.getvalue(),
+                f"{path}.si4": index.getvalue(),
+            }
+        )
 
     def _save_v5(self, path: str) -> None:
-        with open(f"{path}.si5", "wb") as f:
-            write_si5(f, self._entries)
-        with open(f"{path}.sn5", "wb") as f:
-            self._namebase.write_sn5(f)
-        with open(f"{path}.sg5", "wb") as f:
-            f.write(self._game_data)
+        index, names = io.BytesIO(), io.BytesIO()
+        write_si5(index, self._entries)
+        self._namebase.write_sn5(names)
+        _replace_files(
+            {
+                f"{path}.sg5": self._game_data,
+                f"{path}.sn5": names.getvalue(),
+                f"{path}.si5": index.getvalue(),
+            }
+        )
 
     # ------------------------------------------------------------------
     # PGN export / import

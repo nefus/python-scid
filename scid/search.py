@@ -237,6 +237,36 @@ def _matsig_is_reachable(
 
 
 # ---------------------------------------------------------------------------
+# Position identity
+# ---------------------------------------------------------------------------
+
+PositionKey = tuple[int, int, int, int, int, int, int, int, bool, int, int | None]
+
+
+def _position_key(board: chess.Board) -> PositionKey:
+    """Return a key identifying a position independently of move counters.
+
+    ``chess.Board.__eq__`` also compares the halfmove clock and fullmove
+    number, so a target built from a FEN or reached by a transposition would
+    not match.  Like a repetition check, this compares pieces, side to move,
+    castling rights and a *legal* en passant square only.
+    """
+    return (
+        board.pawns,
+        board.knights,
+        board.bishops,
+        board.rooks,
+        board.queens,
+        board.kings,
+        board.occupied_co[chess.WHITE],
+        board.occupied_co[chess.BLACK],
+        board.turn,
+        board.clean_castling_rights(),
+        board.ep_square if board.has_legal_en_passant() else None,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Stored line matching
 # ---------------------------------------------------------------------------
 
@@ -244,11 +274,11 @@ def _matsig_is_reachable(
 def _stored_line_match(
     target_board: chess.Board,
     game_stored_code: int,
-    _cache: dict[int, list[chess.Board]] = {},
+    _cache: dict[int, list[PositionKey]] = {},
 ) -> int:
     """Check if a game's stored line code tells us about the target position.
 
-    Uses a cache of board positions at each ply for each stored line code
+    Uses a cache of position keys at each ply for each stored line code
     to avoid replaying moves on every call.
 
     Returns:
@@ -265,19 +295,18 @@ def _stored_line_match(
 
     # Build/retrieve cached board positions for this stored line
     if game_stored_code not in _cache:
-        boards: list[chess.Board] = []
+        keys: list[PositionKey] = []
         board = chess.Board()
-        boards.append(board.copy())
+        keys.append(_position_key(board))
         for move in game_line:
             board.push(move)
-            boards.append(board.copy())
-        _cache[game_stored_code] = boards
-
-    cached_boards = _cache[game_stored_code]
+            keys.append(_position_key(board))
+        _cache[game_stored_code] = keys
 
     # Check each ply for a match
-    for ply, board in enumerate(cached_boards):
-        if board == target_board:
+    target_key = _position_key(target_board)
+    for ply, key in enumerate(_cache[game_stored_code]):
+        if key == target_key:
             return ply
 
     # The stored line didn't contain the target position.
@@ -609,11 +638,12 @@ def _search_game_for_position(
     # Precompute target piece counts for early termination using popcount
     target_white_total = target_board.occupied_co[chess.WHITE].bit_count()
     target_black_total = target_board.occupied_co[chess.BLACK].bit_count()
+    target_key = _position_key(target_board)
 
     ply = 0
 
     # Check starting position
-    if board.turn == target_turn and board == target_board:
+    if board.turn == target_turn and _position_key(board) == target_key:
         return 0
 
     for node in game.mainline():
@@ -630,7 +660,7 @@ def _search_game_for_position(
                 return -1
 
         # Only check when side to move matches
-        if board.turn == target_turn and board == target_board:
+        if board.turn == target_turn and _position_key(board) == target_key:
             return ply
 
     return -1
@@ -784,19 +814,20 @@ def _material_matches_criteria(
 def _build_max_matsig(criteria: MaterialSearchCriteria) -> int:
     """Build a material signature from the MAX values of each range.
 
-    Used for matsig_isReachable pre-filtering: if the game's final
-    material can't reach a position with these maximum piece counts,
-    it definitely can't match.
+    Used for matsig_isReachable pre-filtering: a game can only match if
+    its final material is reachable from a position with these maximum
+    piece counts.  Unconstrained piece types use the largest encodable
+    count so they never exclude a game.
     """
-    wq = min(criteria.wq[1], 3) if criteria.wq else 1
-    wr = min(criteria.wr[1], 3) if criteria.wr else 2
-    wb = min(criteria.wb[1], 3) if criteria.wb else 2
-    wn = min(criteria.wn[1], 3) if criteria.wn else 2
+    wq = min(criteria.wq[1], 3) if criteria.wq else 3
+    wr = min(criteria.wr[1], 3) if criteria.wr else 3
+    wb = min(criteria.wb[1], 3) if criteria.wb else 3
+    wn = min(criteria.wn[1], 3) if criteria.wn else 3
     wp = min(criteria.wp[1], 8) if criteria.wp else 8
-    bq = min(criteria.bq[1], 3) if criteria.bq else 1
-    br = min(criteria.br[1], 3) if criteria.br else 2
-    bb = min(criteria.bb[1], 3) if criteria.bb else 2
-    bn = min(criteria.bn[1], 3) if criteria.bn else 2
+    bq = min(criteria.bq[1], 3) if criteria.bq else 3
+    br = min(criteria.br[1], 3) if criteria.br else 3
+    bb = min(criteria.bb[1], 3) if criteria.bb else 3
+    bn = min(criteria.bn[1], 3) if criteria.bn else 3
     bp = min(criteria.bp[1], 8) if criteria.bp else 8
 
     return (
@@ -858,8 +889,9 @@ def search_material(
         has_promos = bool(ie.flags & (1 << FLAG_PROMO))
         has_upromos = bool(ie.flags & (1 << FLAG_UPROMO))
 
-        # Pre-filter: can the game's final material reach the target ranges?
-        if not _matsig_is_reachable(ie.final_mat_sig, max_sig, has_promos, has_upromos):
+        # Pre-filter: material only decreases (except via promotion), so the
+        # game's final material must be reachable from the maximum criteria.
+        if not _matsig_is_reachable(max_sig, ie.final_mat_sig, has_promos, has_upromos):
             continue
 
         # Full game decode and ply-by-ply material check
@@ -1135,6 +1167,7 @@ def search_tree(
     target_hp = _hpsig_make(target)
     target_counts = _board_material_counts(target)
     target_turn = target.turn
+    target_key = _position_key(target)
     is_white_to_move = target_turn == chess.WHITE
 
     indices: Sequence[int]
@@ -1223,7 +1256,7 @@ def search_tree(
             else:
                 # Full replay needed
                 current_ply = 0
-                if board.turn == target_turn and board == target:
+                if board.turn == target_turn and _position_key(board) == target_key:
                     found_ply = 0
                 else:
                     for node in game.mainline():
@@ -1241,7 +1274,7 @@ def search_tree(
                             if w_total < t_w or b_total < t_b:
                                 break
 
-                        if board.turn == target_turn and board == target:
+                        if board.turn == target_turn and _position_key(board) == target_key:
                             found_ply = current_ply
                             break
 

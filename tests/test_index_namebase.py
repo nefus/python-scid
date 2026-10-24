@@ -200,3 +200,56 @@ class TestNameBaseAdd:
         # Same string but different type -> different ID namespaces
         assert nb.get_name(0, pid) == "Test"
         assert nb.get_name(1, eid) == "Test"
+
+
+# ---------------------------------------------------------------------------
+# Text encoding
+# ---------------------------------------------------------------------------
+
+
+class TestNamebaseTextEncoding:
+    NAMES = ["Düsseldorf", "Дин Лижэнь", "Ding Liren 丁立人", "Dingo", "€uro"]
+
+    def _roundtrip(self, nb: NameBase, version: int) -> NameBase:
+        buf = io.BytesIO()
+        if version == 4:
+            nb.write_sn4(buf)
+            buf.seek(0)
+            return NameBase.read_sn4(buf)
+        nb.write_sn5(buf)
+        buf.seek(0)
+        return NameBase.read_sn5(buf)
+
+    @pytest.mark.parametrize("version", [4, 5])
+    def test_unicode_names_roundtrip(self, version: int):
+        nb = NameBase()
+        ids = [nb.add_name(0, name) for name in self.NAMES]
+        nb2 = self._roundtrip(nb, version)
+        assert [nb2.get_name(0, i) for i in ids] == self.NAMES
+
+    def test_sn4_stores_utf8(self):
+        nb = NameBase()
+        nb.add_name(0, "Düsseldorf")
+        buf = io.BytesIO()
+        nb.write_sn4(buf)
+        assert "Düsseldorf".encode("utf-8") in buf.getvalue()
+
+    def test_sn4_long_name_truncated_on_character_boundary(self):
+        nb = NameBase()
+        nb.add_name(0, "ü" * 200)  # 400 bytes in UTF-8
+        nb2 = self._roundtrip(nb, 4)
+        assert nb2.get_name(0, 0) == "ü" * 127
+
+    def test_sn4_legacy_bytes_fall_back_to_latin1(self):
+        # Legacy (non-UTF-8) SCID4 names keep decoding byte-for-byte.
+        raw = (
+            b"Scid.sn\x00"
+            + b"\x00" * 4  # timestamp
+            + b"\x00\x00\x01" + b"\x00" * 9  # one player name
+            + b"\x00" * 12  # max frequencies
+            + b"\x00\x00"  # ID
+            + b"\x00"  # frequency
+            + b"\x05R\x94hrl"  # length + name (CP437 'ö')
+        )
+        nb = NameBase.read_sn4(io.BytesIO(raw))
+        assert nb.get_name(0, 0) == "R\x94hrl"

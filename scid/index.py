@@ -11,7 +11,9 @@ from dataclasses import dataclass, field
 from typing import BinaryIO
 
 from scid._filebuf import (
+    decode_text,
     decode_uint32_le,
+    encode_text,
     encode_uint32_le,
     pack5,
     read_uint8,
@@ -115,11 +117,11 @@ def read_si4_header(f: BinaryIO) -> IndexHeader:
     hdr.auto_load = read_uint24_be(f)
 
     desc_bytes = f.read(108)
-    hdr.description = desc_bytes.split(b"\x00", 1)[0].decode("latin-1")
+    hdr.description = decode_text(desc_bytes.split(b"\x00", 1)[0])
 
     for i in range(6):
         flag_bytes = f.read(9)
-        hdr.custom_flags[i] = flag_bytes.split(b"\x00", 1)[0].decode("latin-1")
+        hdr.custom_flags[i] = decode_text(flag_bytes.split(b"\x00", 1)[0])
 
     return hdr
 
@@ -132,11 +134,11 @@ def write_si4_header(f: BinaryIO, hdr: IndexHeader) -> None:
     write_uint24_be(f, hdr.num_games)
     write_uint24_be(f, hdr.auto_load)
 
-    desc = hdr.description.encode("latin-1")[:107]
+    desc = encode_text(hdr.description, 107)
     f.write(desc + b"\x00" * (108 - len(desc)))
 
     for i in range(6):
-        flag = hdr.custom_flags[i].encode("latin-1")[:8]
+        flag = encode_text(hdr.custom_flags[i], 8)
         f.write(flag + b"\x00" * (9 - len(flag)))
 
 

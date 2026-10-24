@@ -122,6 +122,34 @@ def encode_varint(val: int) -> bytes:
 
 
 # ---------------------------------------------------------------------------
+# Text encoding
+# ---------------------------------------------------------------------------
+
+
+def decode_text(data: bytes | bytearray | memoryview) -> str:
+    """Decode a stored string: UTF-8 (current SCID), else latin-1 (legacy DBs)."""
+    raw = bytes(data)
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode("latin-1")
+
+
+def encode_text(text: str, max_len: int | None = None) -> bytes:
+    """Encode a string as UTF-8, truncated to *max_len* bytes on a character boundary."""
+    raw = text.encode("utf-8")
+    if max_len is not None and len(raw) > max_len:
+        raw = raw[:max_len]
+        while raw:
+            try:
+                raw.decode("utf-8")
+                break
+            except UnicodeDecodeError:
+                raw = raw[:-1]
+    return raw
+
+
+# ---------------------------------------------------------------------------
 # Null-terminated string reading
 # ---------------------------------------------------------------------------
 
@@ -136,7 +164,7 @@ def read_terminated_string(data: bytes | memoryview, offset: int) -> tuple[str, 
         if isinstance(data, (bytes, bytearray))
         else _find_null(data, offset)
     )
-    s = bytes(data[offset:end]).decode("latin-1")
+    s = decode_text(data[offset:end])
     return s, end + 1
 
 

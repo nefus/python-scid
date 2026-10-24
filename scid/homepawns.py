@@ -94,6 +94,56 @@ def encode_homepawns(board: chess.Board) -> bytes:
     return bytes(data)
 
 
+def _home_pawn_bitmap(board: chess.Board) -> int:
+    """Return SCID's 16-bit bitmap of home squares *without* their own pawn."""
+    bitmap = 0
+    for i, sq in enumerate(_WHITE_HOME):
+        piece = board.piece_at(sq)
+        if piece is None or piece != chess.Piece(chess.PAWN, chess.WHITE):
+            bitmap |= 1 << (15 - i)
+    for i, sq in enumerate(_BLACK_HOME):
+        piece = board.piece_at(sq)
+        if piece is None or piece != chess.Piece(chess.PAWN, chess.BLACK):
+            bitmap |= 1 << (7 - i)
+    return bitmap
+
+
+def encode_homepawns_from_moves(board: chess.Board, moves: list[chess.Move]) -> bytes:
+    """Compute index home pawn data by replaying a game's main line.
+
+    Unlike :func:`encode_homepawns`, this records the home pawns in the order
+    in which they leave their home squares, which is what SCID stores in the
+    index and what the position search pre-filter relies on.  *board* is the
+    starting position; it is not modified.
+
+    Returns 9 bytes: 1 count byte + 8 data bytes (up to 16 nibbles).
+    """
+    board = board.copy(stack=False)
+    changes: list[int] = []
+    old = _home_pawn_bitmap(board)
+    for move in moves:
+        board.push(move)
+        new = _home_pawn_bitmap(board)
+        left = new & ~old
+        for bit in range(15, -1, -1):
+            if left & (1 << bit):
+                changes.append(bit)
+        old = new
+        if len(changes) >= 16:
+            break
+
+    count = min(len(changes), 16)
+    data = bytearray(9)
+    data[0] = count
+    for idx in range(count):
+        byte_pos = 1 + idx // 2
+        if idx % 2 == 0:
+            data[byte_pos] |= (changes[idx] & 0x0F) << 4
+        else:
+            data[byte_pos] |= changes[idx] & 0x0F
+    return bytes(data)
+
+
 def decode_homepawns(data: bytes) -> list[int]:
     """Decode home pawn data (9 bytes) to list of bit positions (0-15).
 

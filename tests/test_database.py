@@ -321,3 +321,154 @@ class TestSCID4Write:
         assert g.headers["White"] == "Test"
         assert sum(1 for _ in g.mainline_moves()) == 3
         db2.close()
+
+
+# ---------------------------------------------------------------------------
+# Index search data written by add_game
+# ---------------------------------------------------------------------------
+
+
+_SEARCH_FLAG_MASK = 0x07  # FLAG_START | FLAG_PROMO | FLAG_UPROMO
+
+
+class TestAddGameIndexData:
+    """add_game() must produce the index data SCID itself writes."""
+
+    @pytest.mark.parametrize("version", [4, 5])
+    def test_matches_scid_666(self, db_666_path: Path, tmp_db_path: Path, version):
+        self._compare(db_666_path, tmp_db_path, version, 12)
+
+    def test_matches_scid_freechess(self, db_freechess_path: Path, tmp_db_path: Path):
+        self._compare(db_freechess_path, tmp_db_path, 4, 300)
+
+    @staticmethod
+    def _compare(src_path: Path, tmp_db_path: Path, version: int, limit: int):
+        with ScidDatabase.open(src_path) as src:
+            dst = ScidDatabase.create(tmp_db_path, version=version)
+            for i in range(min(limit, len(src))):
+                dst.add_game(src[i])
+                expected = src._entries[i]
+                actual = dst._entries[i]
+                assert actual.flags & _SEARCH_FLAG_MASK == (
+                    expected.flags & _SEARCH_FLAG_MASK
+                ), i
+                assert actual.home_pawn_data == expected.home_pawn_data, i
+                assert actual.stored_line_code == expected.stored_line_code, i
+                assert actual.final_mat_sig == expected.final_mat_sig, i
+
+    def test_promotion_flags(self, tmp_db_path: Path):
+        db = ScidDatabase.create(tmp_db_path, version=5)
+        fen = "8/P6k/8/8/8/8/8/K7 w - - 0 1"
+        for promo in ("Q", "N"):
+            game = chess.pgn.Game()
+            game.setup(fen)
+            game.add_main_variation(game.board().parse_san(f"a8={promo}"))
+            db.add_game(game)
+        assert db._entries[0].flags & _SEARCH_FLAG_MASK == 0b011
+        assert db._entries[1].flags & _SEARCH_FLAG_MASK == 0b111
+        assert db._entries[0].home_pawn_data == b"\x00" * 9
+        assert db._entries[0].stored_line_code == 0
+
+
+class TestDeleteFlag:
+    @pytest.mark.parametrize("version", [4, 5])
+    def test_delete_sets_scid_delete_flag(self, tmp_db_path: Path, version: int):
+        db = ScidDatabase.create(tmp_db_path, version=version)
+        db.add_game(_make_game(white="A", moves=["e4"]))
+        db.delete_game(0)
+        db.save()
+        with ScidDatabase.open(tmp_db_path) as reopened:
+            flags = reopened._entries[0].flags
+            assert flags & (1 << 3)  # FLAG_DELETE
+            assert not flags & 0x01  # FLAG_START untouched
+
+    def test_compact_keeps_setup_games(self, tmp_db_path: Path):
+        db = ScidDatabase.create(tmp_db_path, version=4)
+        setup = chess.pgn.Game()
+        setup.setup("8/8/8/4k3/8/8/4K3/8 w - - 0 1")
+        setup.headers["White"] = "Setup"
+        db.add_game(setup)
+        db.add_game(_make_game(white="Deleted", moves=["e4"]))
+        db.add_game(_make_game(white="Kept", moves=["d4"]))
+        db.delete_game(1)
+        db.compact()
+        assert [db.headers(i)["White"] for i in range(len(db))] == ["Setup", "Kept"]
+
+
+# ---------------------------------------------------------------------------
+# Index counts and ratings
+# ---------------------------------------------------------------------------
+
+
+class TestAddGameCountsAndElo:
+    @pytest.mark.parametrize("version", [4, 5])
+    def test_counts_encoded_once(self, tmp_db_path: Path, version: int):
+        game = _make_game(moves=["e4", "e5", "Nf3"])
+        node = game.variations[0]
+        replies = "c5 c6 d5 d6 e6 g6 Nf6 Nc6 a6 b6 h6 a5 b5 f5 g5".split()
+        for nag, san in enumerate(replies, start=1):
+            node.add_variation(node.board().parse_san(san))
+            node.nags.add(nag)
+        game.variations[0].comment = "x"
+        db = ScidDatabase.create(tmp_db_path, version=version)
+        db.add_game(game)
+        db.save()
+        with ScidDatabase.open(tmp_db_path) as reopened:
+            entry = reopened._entries[0]
+            assert entry.n_variations == 15
+            assert entry.n_nags == 15
+            assert entry.n_comments == 1
+
+    @pytest.mark.parametrize("version", [4, 5])
+    @pytest.mark.parametrize(
+        ("tag", "stored"), [("2850", 2850), ("5000", 4000), ("-5", 0), ("?", 0)]
+    )
+    def test_elo_clamped(self, tmp_db_path: Path, version: int, tag: str, stored: int):
+        game = _make_game(moves=["e4"])
+        game.headers["WhiteElo"] = tag
+        db = ScidDatabase.create(tmp_db_path, version=version)
+        db.add_game(game)
+        db.save()
+        with ScidDatabase.open(tmp_db_path) as reopened:
+            assert reopened._entries[0].white_elo == stored
+
+
+# ---------------------------------------------------------------------------
+# Saving
+# ---------------------------------------------------------------------------
+
+
+class TestSaveSafety:
+    @pytest.mark.parametrize("version", [4, 5])
+    def test_unicode_names_save_and_reload(self, tmp_db_path: Path, version: int):
+        db = ScidDatabase.create(tmp_db_path, version=version)
+        db.add_game(_make_game(white="Дин Лижэнь", black="Müller", moves=["e4"]))
+        db.save()
+        with ScidDatabase.open(tmp_db_path) as reopened:
+            assert reopened.headers(0)["White"] == "Дин Лижэнь"
+            assert reopened.search_header(white="müller") == []
+            assert reopened.search_header(black="müller") == [0]
+
+    @pytest.mark.parametrize("version", [4, 5])
+    def test_failed_save_leaves_files_untouched(
+        self, tmp_db_path: Path, version: int, monkeypatch
+    ):
+        db = ScidDatabase.create(tmp_db_path, version=version)
+        db.add_game(_make_game(white="A", moves=["e4"]))
+        db.save()
+        before = {
+            p.name: p.read_bytes() for p in tmp_db_path.parent.iterdir()
+        }
+
+        db.add_game(_make_game(white="B", moves=["d4"]))
+
+        def fail(*_args, **_kwargs):
+            raise RuntimeError("simulated encoding failure")
+
+        writer = "write_sn4" if version == 4 else "write_sn5"
+        monkeypatch.setattr(type(db._namebase), writer, fail)
+        with pytest.raises(RuntimeError):
+            db.save()
+
+        after = {p.name: p.read_bytes() for p in tmp_db_path.parent.iterdir()}
+        assert after == before  # no partial writes, no leftover temp files

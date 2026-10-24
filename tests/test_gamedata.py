@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 from pathlib import Path
 
 import chess
@@ -164,3 +165,47 @@ class TestFreechessBatch:
                 errors += 1
         db.close()
         assert errors == 0, f"{errors}/1000 games failed to decode"
+
+
+def _roundtrip(pgn: str) -> tuple[chess.pgn.Game, chess.pgn.Game]:
+    game = chess.pgn.read_game(io.StringIO(pgn))
+    return game, decode_game_data(encode_game_data(game))
+
+
+class TestCommentsAndText:
+    def test_variation_starting_comments(self):
+        game, result = _roundtrip(
+            "1. e4 {main} (1. d4 {after d4}) (1. c4) 1... e5 "
+            "(1... c5 {sicilian}) 2. Nf3 *"
+        )
+        game.variations[1].starting_comment = "start d4"
+        game.variations[2].starting_comment = "start c4"
+        game.variations[0].variations[1].starting_comment = "start c5"
+        result = decode_game_data(encode_game_data(game))
+
+        assert result.variations[0].comment == "main"
+        assert [(v.starting_comment, v.comment) for v in result.variations] == [
+            ("", "main"),
+            ("start d4", "after d4"),
+            ("start c4", ""),
+        ]
+        black = result.variations[0].variations
+        assert [(v.starting_comment, v.comment) for v in black] == [
+            ("", ""),
+            ("start c5", "sicilian"),
+        ]
+        assert str(result.mainline_moves()) == str(game.mainline_moves())
+
+    def test_pregame_comment(self):
+        game, result = _roundtrip("{before} 1. e4 {after} *")
+        assert result.comment == "before"
+        assert result.variations[0].comment == "after"
+
+    def test_unicode_tags_and_comments(self):
+        game, result = _roundtrip(
+            '[Annotator "Дмитрий"]\n[Opening "Défense française"]\n\n'
+            "1. e4 {Großartig ♔} *"
+        )
+        assert result.headers["Annotator"] == "Дмитрий"
+        assert result.headers["Opening"] == "Défense française"
+        assert result.variations[0].comment == "Großartig ♔"

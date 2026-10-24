@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import BinaryIO
 
 from scid._filebuf import (
+    decode_text,
+    encode_text,
     read_uint8,
     read_uint16_be,
     read_uint24_be,
@@ -121,14 +123,15 @@ class NameBase:
         f.write(SCID4_MAGIC_NAMEBASE)
         write_uint32_be(f, 0)  # timestamp
 
-        # Collect actual names per type, sorted
-        sorted_names: list[list[tuple[int, str]]] = []
+        # Collect actual names per type as encoded bytes (SCID4 stores at
+        # most 255 bytes per name), sorted bytewise like SCID's unsigned
+        # string comparison.
+        sorted_names: list[list[tuple[int, bytes]]] = []
         for nt in range(NUM_NAME_TYPES):
             entries = []
             for i, name in enumerate(self.names[nt]):
                 if name is not None:
-                    entries.append((i, name))
-            # Sort by name (SCID custom sort: unsigned first char)
+                    entries.append((i, encode_text(name, 255)))
             entries.sort(key=lambda x: x[1])
             sorted_names.append(entries)
 
@@ -171,7 +174,7 @@ class NameBase:
             if len(data) < length:
                 break
 
-            name = data.decode("utf-8", errors="replace")
+            name = decode_text(data)
 
             if name_type < NUM_NAME_TYPES:
                 # Sequential ID assignment
@@ -207,14 +210,14 @@ class NameBase:
             for name in self.names[nt]:
                 if name is None:
                     name = ""
-                data = name.encode("utf-8")
+                data = encode_text(name)
                 val = (len(data) << 3) | nt
                 write_varint(f, val)
                 f.write(data)
 
         # Write DB_INFO entries
         for key, value in self.db_info.items():
-            data = (key + value).encode("utf-8")
+            data = encode_text(key + value)
             val = (len(data) << 3) | NAME_INFO
             write_varint(f, val)
             f.write(data)
@@ -228,8 +231,12 @@ class NameBase:
 def _read_sn4_names(
     f: BinaryIO, nb: NameBase, nt: int, num_names: int, max_freq: int
 ) -> None:
-    """Read front-coded name records for one name type from .sn4 file."""
-    prev_name = ""
+    """Read front-coded name records for one name type from .sn4 file.
+
+    Lengths and shared prefixes count bytes, so decoding happens per name
+    after the front coding has been undone.
+    """
+    prev_name = b""
 
     # Determine field sizes
     id_size = 3 if num_names >= 65536 else 2
@@ -268,16 +275,15 @@ def _read_sn4_names(
         if suffix_len < 0:
             raise ValueError(f"Corrupt .sn4: prefix {prefix} > length {length}")
 
-        suffix = f.read(suffix_len).decode("latin-1")
-        name = prev_name[:prefix] + suffix
+        name = prev_name[:prefix] + f.read(suffix_len)
         prev_name = name
 
-        nb.insert(nt, name_id, name)
+        nb.insert(nt, name_id, decode_text(name))
 
 
 def _write_sn4_names(
     f: BinaryIO,
-    sorted_entries: list[tuple[int, str]],
+    sorted_entries: list[tuple[int, bytes]],
     num_names: int,
     max_freq: int,
     freqs: list[int],
@@ -292,7 +298,7 @@ def _write_sn4_names(
     else:
         freq_size = 1
 
-    prev_name = ""
+    prev_name = b""
 
     for i, (name_id, name) in enumerate(sorted_entries):
         # Write ID
@@ -310,13 +316,8 @@ def _write_sn4_names(
         else:
             write_uint8(f, fr)
 
-        # Write name (front-coded)
-        length = len(name)
-        if length > 255:
-            length = 255
-            name = name[:255]
-
-        write_uint8(f, length)
+        # Write name (front-coded, already truncated to 255 bytes)
+        write_uint8(f, len(name))
 
         if i > 0:
             prefix = _str_prefix(name, prev_name)
@@ -324,14 +325,13 @@ def _write_sn4_names(
         else:
             prefix = 0
 
-        suffix = name[prefix:]
-        f.write(suffix.encode("latin-1"))
+        f.write(name[prefix:])
 
         prev_name = name
 
 
-def _str_prefix(s1: str, s2: str) -> int:
-    """Return the length of the common prefix of two strings."""
+def _str_prefix(s1: bytes, s2: bytes) -> int:
+    """Return the length of the common prefix of two byte strings."""
     n = min(len(s1), len(s2))
     for i in range(n):
         if s1[i] != s2[i]:
