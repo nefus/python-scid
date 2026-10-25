@@ -145,6 +145,10 @@ with ScidDatabase.open("mydb") as db:
     # hits is a list of game indices
     for i in hits:
         print(db.headers(i)["White"], "vs", db.headers(i)["Black"])
+
+    # Stream large result sets instead of keeping every index in memory
+    for i in db.iter_search_header(eco_min="B20", eco_max="B99"):
+        print(db.headers(i)["White"])
 ```
 
 **Available criteria** (all optional, combined with AND):
@@ -188,6 +192,10 @@ with ScidDatabase.open("mydb") as db:
     results = db.search_position(board)
     for r in results:
         print(f"Game {r.game_index} reaches position at ply {r.ply}")
+
+    # Use this form when many games may match
+    for r in db.iter_search_position(board):
+        print(f"Game {r.game_index} reaches position at ply {r.ply}")
 ```
 
 ### Material search
@@ -205,6 +213,10 @@ with ScidDatabase.open("mydb") as db:
     )
     results = db.search_material(c)
     for r in results:
+        print(f"Game {r.game_index} at ply {r.ply}")
+
+    # Or stream matches to keep memory bounded
+    for r in db.iter_search_material(c):
         print(f"Game {r.game_index} at ply {r.ply}")
 ```
 

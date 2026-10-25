@@ -26,7 +26,7 @@ import io
 import os
 import tempfile
 from pathlib import Path
-from typing import Iterator, overload
+from typing import Iterable, Iterator, overload
 
 import chess.pgn
 
@@ -62,9 +62,10 @@ from scid.search import (
     MaterialSearchResult,
     PositionSearchResult,
     TreeResult,
+    iter_search_header,
+    iter_search_material,
+    iter_search_position,
     search_header,
-    search_material,
-    search_position,
     search_tree,
 )
 from scid.stored_lines import classify
@@ -324,6 +325,17 @@ class ScidDatabase:
             criteria = HeaderSearchCriteria(**kwargs)  # type: ignore[arg-type]
         return search_header(self._entries, self._namebase, criteria, game_indices)
 
+    def iter_search_header(
+        self,
+        criteria: HeaderSearchCriteria | None = None,
+        game_indices: Iterable[int] | None = None,
+        **kwargs: object,
+    ) -> Iterator[int]:
+        """Yield matching game indices without storing the full result."""
+        if criteria is None:
+            criteria = HeaderSearchCriteria(**kwargs)  # type: ignore[arg-type]
+        return iter_search_header(self._entries, self._namebase, criteria, game_indices)
+
     def search_position(
         self,
         target: chess.Board,
@@ -341,7 +353,15 @@ class ScidDatabase:
         Returns:
             List of :class:`PositionSearchResult` with game_index and ply.
         """
-        return search_position(
+        return list(self.iter_search_position(target, game_indices))
+
+    def iter_search_position(
+        self,
+        target: chess.Board,
+        game_indices: Iterable[int] | None = None,
+    ) -> Iterator[PositionSearchResult]:
+        """Yield position matches as the index scan finds them."""
+        return iter_search_position(
             self._entries,
             self._namebase,
             self._game_data,
@@ -375,7 +395,18 @@ class ScidDatabase:
         """
         if criteria is None:
             criteria = MaterialSearchCriteria(**kwargs)  # type: ignore[arg-type]
-        return search_material(
+        return list(self.iter_search_material(criteria, game_indices))
+
+    def iter_search_material(
+        self,
+        criteria: MaterialSearchCriteria | None = None,
+        game_indices: Iterable[int] | None = None,
+        **kwargs: object,
+    ) -> Iterator[MaterialSearchResult]:
+        """Yield material matches as the index scan finds them."""
+        if criteria is None:
+            criteria = MaterialSearchCriteria(**kwargs)  # type: ignore[arg-type]
+        return iter_search_material(
             self._entries,
             self._game_data,
             criteria,

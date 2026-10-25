@@ -20,7 +20,7 @@ Implements four search types matching SCID's native search algorithms:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Sequence
+from typing import Callable, Iterable, Iterator, Sequence
 
 import chess
 
@@ -410,6 +410,15 @@ def search_header(
     criteria: HeaderSearchCriteria,
     game_indices: Sequence[int] | None = None,
 ) -> list[int]:
+    return list(iter_search_header(entries, namebase, criteria, game_indices))
+
+
+def iter_search_header(
+    entries: Sequence[IndexEntry],
+    namebase: NameBase,
+    criteria: HeaderSearchCriteria,
+    game_indices: Iterable[int] | None = None,
+) -> Iterator[int]:
     """Search games by header criteria.
 
     Args:
@@ -420,10 +429,10 @@ def search_header(
             Otherwise search all games.
 
     Returns:
-        List of matching game indices (0-based).
+        Matching game indices (0-based), yielded without collecting the full result.
     """
     c = criteria
-    indices: Sequence[int]
+    indices: Iterable[int]
     if game_indices is not None:
         indices = game_indices
     else:
@@ -543,7 +552,6 @@ def search_header(
         filters.append(lambda _ie, i, v=_gnmax: i <= v)
 
     # Apply all filters
-    result: list[int] = []
     for idx in indices:
         ie = entries[idx]
         match = True
@@ -552,9 +560,7 @@ def search_header(
                 match = False
                 break
         if match:
-            result.append(idx)
-
-    return result
+            yield idx
 
 
 # ---------------------------------------------------------------------------
@@ -674,6 +680,19 @@ def search_position(
     game_indices: Sequence[int] | None = None,
     decode_game: Callable[[int], chess.pgn.Game] | None = None,
 ) -> list[PositionSearchResult]:
+    return list(iter_search_position(
+        entries, namebase, game_data, target, game_indices, decode_game,
+    ))
+
+
+def iter_search_position(
+    entries: Sequence[IndexEntry],
+    namebase: NameBase,
+    game_data: bytes | bytearray,
+    target: chess.Board,
+    game_indices: Iterable[int] | None = None,
+    decode_game: Callable[[int], chess.pgn.Game] | None = None,
+) -> Iterator[PositionSearchResult]:
     """Search for games containing a specific board position.
 
     Uses SCID's three-level pre-filtering to minimize game decoding:
@@ -690,21 +709,18 @@ def search_position(
         decode_game: Callable that takes a game index and returns a
             chess.pgn.Game. If None, games are decoded using gamedata module.
 
-    Returns:
-        List of PositionSearchResult for matching games.
+    Yields matching results as they are found.
     """
     # Precompute target position properties
     target_hp = _hpsig_make(target)
     target_counts = _board_material_counts(target)
     target_turn = target.turn
 
-    indices: Sequence[int]
+    indices: Iterable[int]
     if game_indices is not None:
         indices = game_indices
     else:
         indices = range(len(entries))
-
-    results: list[PositionSearchResult] = []
 
     for idx in indices:
         ie = entries[idx]
@@ -714,7 +730,7 @@ def search_position(
         if pre == -2:
             continue  # Definitely no match
         if pre >= 0:
-            results.append(PositionSearchResult(game_index=idx, ply=pre))
+            yield PositionSearchResult(game_index=idx, ply=pre)
             continue
 
         # Stage 4: Full game decode and replay
@@ -728,9 +744,7 @@ def search_position(
 
         ply = _search_game_for_position(game, target, target_turn)
         if ply >= 0:
-            results.append(PositionSearchResult(game_index=idx, ply=ply))
-
-    return results
+            yield PositionSearchResult(game_index=idx, ply=ply)
 
 
 # ---------------------------------------------------------------------------
@@ -859,6 +873,18 @@ def search_material(
     game_indices: Sequence[int] | None = None,
     decode_game: Callable[[int], chess.pgn.Game] | None = None,
 ) -> list[MaterialSearchResult]:
+    return list(iter_search_material(
+        entries, game_data, criteria, game_indices, decode_game,
+    ))
+
+
+def iter_search_material(
+    entries: Sequence[IndexEntry],
+    game_data: bytes | bytearray,
+    criteria: MaterialSearchCriteria,
+    game_indices: Iterable[int] | None = None,
+    decode_game: Callable[[int], chess.pgn.Game] | None = None,
+) -> Iterator[MaterialSearchResult]:
     """Search for games where material counts match the given ranges.
 
     Pre-filters using matsig_isReachable before full game decode.
@@ -871,18 +897,15 @@ def search_material(
         decode_game: Callable that takes a game index and returns a
             chess.pgn.Game. If None, games are decoded using gamedata module.
 
-    Returns:
-        List of MaterialSearchResult for matching games.
+    Yields matching results as they are found.
     """
     max_sig = _build_max_matsig(criteria)
 
-    indices: Sequence[int]
+    indices: Iterable[int]
     if game_indices is not None:
         indices = game_indices
     else:
         indices = range(len(entries))
-
-    results: list[MaterialSearchResult] = []
 
     for idx in indices:
         ie = entries[idx]
@@ -908,7 +931,7 @@ def search_material(
 
         # Check starting position
         if _material_matches_criteria(board, criteria):
-            results.append(MaterialSearchResult(game_index=idx, ply=0))
+            yield MaterialSearchResult(game_index=idx, ply=0)
             continue
 
         found = False
@@ -916,13 +939,12 @@ def search_material(
             board.push(node.move)
             ply += 1
             if _material_matches_criteria(board, criteria):
-                results.append(MaterialSearchResult(game_index=idx, ply=ply))
+                yield MaterialSearchResult(game_index=idx, ply=ply)
                 found = True
                 break
 
         # (If not found, just continue to next game)
 
-    return results
 
 
 # ---------------------------------------------------------------------------

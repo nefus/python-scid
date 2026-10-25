@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 from pathlib import Path
+from typing import Iterator
 
 import chess
 import chess.pgn
@@ -346,6 +347,10 @@ class TestHeaderSearch:
             hits = db.search_header(c)
             assert all(i in hits for i in [3, 6, 7])
 
+    def test_iter_search_header_matches_list_api(self, db_666_path: Path) -> None:
+        with ScidDatabase.open(db_666_path) as db:
+            assert list(db.iter_search_header(results={"0-1"})) == db.search_header(results={"0-1"})
+
     def test_search_header_freechess_by_elo(self, db_freechess_path: Path) -> None:
         with ScidDatabase.open(db_freechess_path) as db:
             hits = db.search_header(
@@ -432,6 +437,19 @@ class TestPositionSearch:
             matching_indices = {r.game_index for r in results}
             # Only games 8, 9, 10 should be searched
             assert matching_indices <= {8, 9, 10}
+
+    def test_iter_search_position_matches_list_api(self, db_666_path: Path) -> None:
+        with ScidDatabase.open(db_666_path) as db:
+            target = chess.Board()
+            matches = db.search_position(target)
+            assert list(db.iter_search_position(target)) == matches
+            first_match = matches[0].game_index
+
+            def first_match_only() -> Iterator[int]:
+                yield first_match
+                raise AssertionError("the iterator read beyond the first match")
+
+            assert next(db.iter_search_position(target, game_indices=first_match_only())) == matches[0]
 
     def test_position_search_freechess(self, db_freechess_path: Path) -> None:
         """Search for the Sicilian Defense position (1.e4 c5) in freechess."""
@@ -540,6 +558,11 @@ class TestMaterialSearch:
                         break
                 wp = len(board.pieces(chess.PAWN, chess.WHITE))
                 assert 0 <= wp <= 4
+
+    def test_iter_search_material_matches_list_api(self, db_666_path: Path) -> None:
+        with ScidDatabase.open(db_666_path) as db:
+            criteria = MaterialSearchCriteria(wq=(0, 0), bq=(0, 0))
+            assert list(db.iter_search_material(criteria)) == db.search_material(criteria)
 
     def test_material_search_freechess(self, db_freechess_path: Path) -> None:
         """Search for queen sacrifice in first 200 freechess games."""
